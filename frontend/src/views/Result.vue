@@ -332,9 +332,14 @@ onMounted(async () => {
     tripPlan.value = JSON.parse(data)
     // 加载景点图片
     await loadAttractionPhotos()
-    // 等待DOM渲染完成后初始化地图
+    // 等待 DOM 渲染完成后初始化地图
     await nextTick()
-    initMap()
+    // 延迟一下确保地图容器已经渲染
+    setTimeout(() => {
+      initMap()
+    }, 300)
+  } else {
+    message.warning('请先创建旅行计划')
   }
 })
 
@@ -835,26 +840,73 @@ void restoreMap
 // 初始化地图
 const initMap = async () => {
   try {
+    // 检查地图容器是否存在
+    const mapContainer = document.getElementById('amap-container')
+    if (!mapContainer) {
+      console.error('地图容器未找到')
+      message.error('地图容器未找到')
+      return
+    }
+
+    // 检查是否已经初始化过地图
+    if (map) {
+      console.log('地图已存在，销毁后重新创建')
+      map.destroy()
+      map = null
+    }
+
+    // 获取配置
+    const amapKey = import.meta.env.AMAP_WEB_JS_KEY || import.meta.env.VITE_AMAP_WEB_JS_KEY
+    console.log('高德地图 JS API Key:', amapKey ? '已配置' : '未配置')
+
+    if (!amapKey) {
+      throw new Error('高德地图 API Key 未配置，请检查 .env 文件')
+    }
+
+    // 加载高德地图 API
     const AMap = await AMapLoader.load({
-      key: import.meta.env.VITE_AMAP_WEB_JS_KEY,  // 高德地图Web端(JS API) Key
+      key: amapKey,
       version: '2.0',
       plugins: ['AMap.Marker', 'AMap.Polyline', 'AMap.InfoWindow']
     })
 
+    console.log('高德地图 API 加载成功')
+
     // 创建地图实例
     map = new AMap.Map('amap-container', {
       zoom: 12,
-      center: [116.397128, 39.916527], // 默认中心点(北京)
+      center: [116.397128, 39.916527], // 默认中心点 (北京)
       viewMode: '3D'
+    })
+
+    // 地图加载完成事件
+    map.on('complete', () => {
+      console.log('地图初始化完成')
+      message.success('地图加载成功')
     })
 
     // 添加景点标记
     addAttractionMarkers(AMap)
 
-    message.success('地图加载成功')
-  } catch (error) {
+  } catch (error: any) {
     console.error('地图加载失败:', error)
-    message.error('地图加载失败')
+    const errorMsg = error.message || '地图加载失败，请检查网络连接和 API Key 配置'
+    message.error(errorMsg)
+    
+    // 显示详细的错误信息到地图容器
+    const mapContainer = document.getElementById('amap-container')
+    if (mapContainer) {
+      mapContainer.innerHTML = `
+        <div style="display: flex; align-items: center; justify-content: center; height: 100%; flex-direction: column; color: #999;">
+          <div style="font-size: 48px; margin-bottom: 16px;">🗺️</div>
+          <div style="font-size: 16px; margin-bottom: 8px;">地图加载失败</div>
+          <div style="font-size: 12px; color: #ff4d4f;">${errorMsg}</div>
+          <a-button type="primary" size="small" style="margin-top: 16px;" onclick="window.location.reload()">
+            刷新页面重试
+          </a-button>
+        </div>
+      `
+    }
   }
 }
 

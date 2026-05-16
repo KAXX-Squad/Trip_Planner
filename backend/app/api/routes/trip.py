@@ -107,18 +107,19 @@ async def plan_trip_stream(request: TripRequest):
 async def health_check():
     """健康检查"""
     try:
-        # 检查Agent是否可用
+        # 检查 Agent 是否可用
         agent = get_trip_planner_agent()
         
         return {
             "status": "healthy",
-            "service": "trip-planner",
-            "agent_name": agent.agent.name,
-            "tools_count": len(agent.agent.list_tools())
+            "service": "trip-planner-langgraph",
+            "framework": "LangGraph",
+            "tools_count": len(agent.tools),
+            "workflow_nodes": ["attraction_search", "weather_search", "hotel_search", "plan_generator"]
         }
     except Exception as e:
         raise HTTPException(
             status_code=503,
-            detail=f"服务不可用: {str(e)}"
+            detail=f"服务不可用：{str(e)}"
         )
 
