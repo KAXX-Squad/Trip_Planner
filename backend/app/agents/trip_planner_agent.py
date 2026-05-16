@@ -1,8 +1,8 @@
-"""基于 LangGraph 的多智能体旅行规划系统"""
+"""基于 LangGraph 的多智能体旅行规划系统 - 支持并行执行"""
 
 import json
 import asyncio
-from typing import TypedDict, AsyncGenerator
+from typing import TypedDict, AsyncGenerator, Annotated
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, SystemMessage
 from ..services.llm_service import get_llm
@@ -14,6 +14,14 @@ from datetime import datetime, timedelta
 
 # ============ 状态定义 ============
 
+def progress_reducer(a: int, b: int) -> int:
+    """进度值 reducer - 取最大值"""
+    return max(a, b)
+
+def messages_reducer(a: list, b: list) -> list:
+    """消息列表 reducer - 合并列表"""
+    return a + b
+
 class AgentState(TypedDict):
     """定义智能体工作流的状态"""
     request: TripRequest
@@ -21,8 +29,9 @@ class AgentState(TypedDict):
     weather: str
     hotels: str
     plan: str
-    messages: list
-    progress: int
+    # 使用 Annotated 类型支持并发更新
+    messages: Annotated[list, messages_reducer]
+    progress: Annotated[int, progress_reducer]
     error: str
 
 
@@ -164,7 +173,7 @@ class LangGraphTripPlanner:
         return self.llm
 
     def _build_workflow(self) -> StateGraph:
-        """构建 LangGraph 工作流"""
+        """构建 LangGraph 工作流 - 支持并行执行"""
         # 创建状态图
         workflow = StateGraph(AgentState)
 
@@ -174,20 +183,24 @@ class LangGraphTripPlanner:
         workflow.add_node("hotel_search", self.hotel_search_node)
         workflow.add_node("plan_generator", self.plan_generator_node)
 
-        # 设置入口点
+        # 设置入口点 - 从景点搜索开始
         workflow.set_entry_point("attraction_search")
-
-        # 添加并行执行的边 (使用条件边实现并行)
-        # 由于 LangGraph 的并行需要特殊处理，我们使用顺序执行但异步方式
+        
+        # 使用并行分支：从景点搜索节点同时触发天气和酒店搜索
+        # LangGraph 的 add_edge 支持从一个节点到多个节点的分支
         workflow.add_edge("attraction_search", "weather_search")
-        workflow.add_edge("weather_search", "hotel_search")
+        workflow.add_edge("attraction_search", "hotel_search")
+        
+        # 汇聚：天气和酒店搜索都完成后，进入计划生成节点
+        workflow.add_edge("weather_search", "plan_generator")
         workflow.add_edge("hotel_search", "plan_generator")
+        
         workflow.add_edge("plan_generator", END)
 
         return workflow
 
     def attraction_search_node(self, state: AgentState) -> dict:
-        """景点搜索节点"""
+        """景点搜索节点 - 并行执行"""
         try:
             request = state["request"]
             print(f"📍 景点搜索节点：搜索{request.city}的景点")
@@ -219,7 +232,7 @@ class LangGraphTripPlanner:
             }
 
     def weather_search_node(self, state: AgentState) -> dict:
-        """天气查询节点"""
+        """天气查询节点 - 并行执行"""
         try:
             request = state["request"]
             print(f"🌤️  天气查询节点：查询{request.city}的天气")
@@ -248,7 +261,7 @@ class LangGraphTripPlanner:
             }
 
     def hotel_search_node(self, state: AgentState) -> dict:
-        """酒店搜索节点"""
+        """酒店搜索节点 - 并行执行"""
         try:
             request = state["request"]
             print(f"🏨 酒店搜索节点：搜索{request.city}的酒店")
@@ -404,23 +417,19 @@ class LangGraphTripPlanner:
 
     async def plan_trip_stream(self, request: TripRequest) -> AsyncGenerator[dict, None]:
         """
-        异步流式生成旅行计划 - 通过 SSE 推送实时进度
-
-        Args:
-            request: 旅行请求
-
-        Yields:
-            包含进度信息和结果的字典
+        使用 LangGraph 原生流式执行，实时返回进度
+        
+        通过 LangGraph 的 astream 方法，可以在每个节点执行后获取更新，
+        实现真正的流式执行和进度追踪。
         """
         try:
             print(f"\n{'='*60}")
-            print(f"🚀 开始流式 LangGraph 多智能体协作规划旅行...")
+            print(f"🚀 开始 LangGraph 流式执行...")
             print(f"目的地：{request.city}")
-            print(f"日期：{request.start_date} 至 {request.end_date}")
             print(f"天数：{request.travel_days}天")
             print(f"{'='*60}\n")
 
-            yield {"type": "progress", "progress": 5, "message": "正在初始化多智能体系统..."}
+            yield {"type": "progress", "progress": 5, "message": "正在初始化 LangGraph 工作流..."}
 
             # 初始化状态
             initial_state = {
@@ -437,56 +446,41 @@ class LangGraphTripPlanner:
                 "error": ""
             }
 
-            # 使用异步方式执行工作流
-            # 注意：LangGraph 的异步执行需要特殊处理
-            # 这里我们使用同步执行 + 异步生成器的方式
-            
-            # 步骤 1: 景点搜索
-            yield {"type": "progress", "progress": 10, "message": "🔍 正在搜索景点信息..."}
-            attraction_result = await asyncio.to_thread(
-                self.attraction_search_node, 
-                {**initial_state, "progress": 10}
-            )
-            initial_state["attractions"] = attraction_result["attractions"]
-            initial_state["progress"] = attraction_result["progress"]
-            
-            yield {"type": "progress", "progress": 25, "message": "✅ 景点搜索完成"}
+            # 使用 LangGraph 原生流式执行
+            # stream_mode="updates" 会在每个节点执行后返回更新
+            # stream_mode="values" 会返回完整状态
+            progress_map = {
+                "attraction_search": (15, "🔍 正在搜索景点信息..."),
+                "weather_search": (25, "🌤️  正在查询天气信息..."),
+                "hotel_search": (35, "🏨 正在搜索酒店信息..."),
+                "plan_generator": (50, "📋 正在生成行程计划..."),
+            }
 
-            # 步骤 2: 天气查询
-            yield {"type": "progress", "progress": 30, "message": "🌤️  正在查询天气信息..."}
-            weather_result = await asyncio.to_thread(
-                self.weather_search_node,
-                initial_state
-            )
-            initial_state["weather"] = weather_result["weather"]
-            initial_state["progress"] = weather_result["progress"]
-            
-            yield {"type": "progress", "progress": 45, "message": "✅ 天气查询完成"}
+            async for chunk in self.app.astream(initial_state, stream_mode="updates"):
+                # chunk 是一个字典，键是节点名，值是该节点的输出
+                for node_name, node_output in chunk.items():
+                    print(f"✅ 节点完成：{node_name}")
+                    
+                    # 发送进度更新
+                    if node_name in progress_map:
+                        progress, message = progress_map[node_name]
+                        yield {"type": "progress", "progress": progress, "message": message}
+                        
+                        # 如果有错误，也发送错误信息
+                        if "error" in node_output:
+                            yield {
+                                "type": "progress", 
+                                "progress": progress, 
+                                "message": f"⚠️ {node_name} 执行失败：{node_output.get('error', '未知错误')}"
+                            }
 
-            # 步骤 3: 酒店搜索
-            yield {"type": "progress", "progress": 50, "message": "🏨 正在搜索酒店信息..."}
-            hotel_result = await asyncio.to_thread(
-                self.hotel_search_node,
-                initial_state
-            )
-            initial_state["hotels"] = hotel_result["hotels"]
-            initial_state["progress"] = hotel_result["progress"]
+            # 所有节点执行完成，获取最终状态
+            final_state = await self.app.ainvoke(initial_state)
             
-            yield {"type": "progress", "progress": 65, "message": "✅ 酒店搜索完成"}
-
-            # 步骤 4: 行程规划
-            yield {"type": "progress", "progress": 70, "message": "📋 正在生成行程计划..."}
-            plan_result = await asyncio.to_thread(
-                self.plan_generator_node,
-                initial_state
-            )
-            initial_state["plan"] = plan_result["plan"]
-            initial_state["progress"] = plan_result["progress"]
-            
-            yield {"type": "progress", "progress": 90, "message": "🔄 正在解析和优化行程数据..."}
+            yield {"type": "progress", "progress": 80, "message": "🔄 正在解析和优化行程数据..."}
 
             # 解析最终计划
-            trip_plan = self._parse_response(initial_state["plan"], request)
+            trip_plan = self._parse_response(final_state["plan"], request)
 
             print(f"{'='*60}")
             print(f"✅ 旅行计划生成完成!")
