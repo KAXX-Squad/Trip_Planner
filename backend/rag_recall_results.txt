@@ -1,0 +1,69 @@
+RAG 召回率测试报告
+================================================================================
+
+总查询数：8
+平均召回率：100.00%
+平均精确率：51.04%
+平均 MRR: 0.88
+平均 NDCG: 1.49
+
+================================================================================
+详细结果
+================================================================================
+
+[1] 测试城市景点推荐
+    查询：北京旅游景点推荐
+    Recall: 1.00, Precision: 0.50, MRR: 1.00, NDCG: 2.08
+    期望文档：['city_guides.md']
+    检索结果：['city_guides.md', 'city_guides.md', 'city_guides.md', 'city_guides.md', 'travel_tips.md']
+    命中文档：['city_guides.md']
+
+[2] 测试预算控制建议
+    查询：旅行预算怎么控制
+    Recall: 1.00, Precision: 0.33, MRR: 1.00, NDCG: 1.50
+    期望文档：['budget_tips.md']
+    检索结果：['budget_tips.md', 'budget_tips.md', 'travel_tips.md', 'travel_tips.md', 'seasonal_travel.md']
+    命中文档：['budget_tips.md']
+
+[3] 测试最佳旅行季节
+    查询：什么时候去西藏旅游最好
+    Recall: 1.00, Precision: 0.33, MRR: 1.00, NDCG: 1.50
+    期望文档：['seasonal_travel.md']
+    检索结果：['seasonal_travel.md', 'seasonal_travel.md', 'travel_tips.md', 'city_guides.md', 'travel_tips.md']
+    命中文档：['seasonal_travel.md']
+
+[4] 测试旅行打包建议
+    查询：旅行打包技巧
+    Recall: 1.00, Precision: 0.25, MRR: 0.50, NDCG: 0.83
+    期望文档：['travel_tips.md']
+    检索结果：['budget_tips.md', 'travel_tips.md', 'travel_tips.md', 'seasonal_travel.md', 'city_guides.md']
+    命中文档：['travel_tips.md']
+
+[5] 测试城市美食推荐
+    查询：上海美食推荐
+    Recall: 1.00, Precision: 1.00, MRR: 1.00, NDCG: 2.28
+    期望文档：['city_guides.md']
+    检索结果：['city_guides.md', 'city_guides.md', 'city_guides.md', 'city_guides.md', 'city_guides.md']
+    命中文档：['city_guides.md']
+
+[6] 测试省钱技巧
+    查询：如何节省住宿费用
+    Recall: 1.00, Precision: 0.33, MRR: 1.00, NDCG: 1.50
+    期望文档：['budget_tips.md']
+    检索结果：['budget_tips.md', 'budget_tips.md', 'travel_tips.md', 'travel_tips.md', 'seasonal_travel.md']
+    命中文档：['budget_tips.md']
+
+[7] 测试特殊天气建议
+    查询：雨季旅行注意事项
+    Recall: 1.00, Precision: 0.67, MRR: 1.00, NDCG: 1.39
+    期望文档：['travel_tips.md', 'seasonal_travel.md']
+    检索结果：['seasonal_travel.md', 'travel_tips.md', 'travel_tips.md', 'seasonal_travel.md', 'city_guides.md']
+    命中文档：['travel_tips.md', 'seasonal_travel.md']
+
+[8] 测试综合旅游攻略
+    查询：云南旅游攻略
+    Recall: 1.00, Precision: 0.67, MRR: 0.50, NDCG: 0.86
+    期望文档：['city_guides.md', 'seasonal_travel.md']
+    检索结果：['travel_tips.md', 'city_guides.md', 'seasonal_travel.md', 'city_guides.md', 'city_guides.md']
+    命中文档：['seasonal_travel.md', 'city_guides.md']
+
