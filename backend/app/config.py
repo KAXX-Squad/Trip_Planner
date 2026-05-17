@@ -112,6 +112,42 @@ class Settings(BaseSettings):
         """获取LLM重试延迟(秒)"""
         return int(os.getenv("LLM_RETRY_DELAY") or "2")
 
+    # ============ RAG配置属性 ============
+
+    @property
+    def rag_embedding_model(self) -> str:
+        """获取RAG Embedding模型名称
+
+        默认使用本地 HuggingFace 模型，无需 API Key。
+        可选值: all-MiniLM-L6-v2, text-embedding-v3, text-embedding-ada-002
+        """
+        return os.getenv("RAG_EMBEDDING_MODEL") or "all-MiniLM-L6-v2"
+
+    @property
+    def rag_embedding_provider(self) -> str:
+        """获取RAG Embedding提供者: huggingface / openai"""
+        return os.getenv("RAG_EMBEDDING_PROVIDER") or "huggingface"
+
+    @property
+    def rag_chunk_size(self) -> int:
+        """获取RAG文档块大小"""
+        return int(os.getenv("RAG_CHUNK_SIZE") or "500")
+
+    @property
+    def rag_chunk_overlap(self) -> int:
+        """获取RAG文档块重叠大小"""
+        return int(os.getenv("RAG_CHUNK_OVERLAP") or "50")
+
+    @property
+    def rag_retrieval_k(self) -> int:
+        """获取RAG检索返回文档数"""
+        return int(os.getenv("RAG_RETRIEVAL_K") or "5")
+
+    @property
+    def rag_enabled(self) -> bool:
+        """获取RAG是否启用"""
+        return os.getenv("RAG_ENABLED", "true").lower() == "true"
+
 
 # 创建全局配置实例
 settings = Settings()
@@ -201,6 +237,17 @@ def print_config():
     print(f"  超时时间: {settings.llm_timeout}秒")
     print(f"  最大重试次数: {settings.llm_max_retries}")
     print(f"  重试延迟: {settings.llm_retry_delay}秒")
+    
+    
+    # RAG配置
+    print(f"\nRAG配置:")
+    print(f"  RAG启用: {'是' if settings.rag_enabled else '否'}")
+    if settings.rag_enabled:
+        print(f"  Embedding提供者: {settings.rag_embedding_provider}")
+        print(f"  Embedding模型: {settings.rag_embedding_model}")
+        print(f"  文档块大小: {settings.rag_chunk_size}")
+        print(f"  文档块重叠: {settings.rag_chunk_overlap}")
+        print(f"  检索数量: {settings.rag_retrieval_k}")
     
     print(f"\n日志级别: {settings.log_level}")
 

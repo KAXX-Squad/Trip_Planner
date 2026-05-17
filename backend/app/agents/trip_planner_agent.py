@@ -6,6 +6,7 @@ from typing import TypedDict, AsyncGenerator, Annotated
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, SystemMessage
 from ..services.llm_service import get_llm
+from ..services.rag_service import get_rag_service
 from ..tools.amap_tools import get_amap_tools
 from ..models.schemas import TripRequest, TripPlan, DayPlan, Attraction, Meal, WeatherInfo, Location, Hotel
 from ..config import get_settings
@@ -290,7 +291,7 @@ class LangGraphTripPlanner:
             }
 
     def plan_generator_node(self, state: AgentState) -> dict:
-        """行程规划生成节点"""
+        """行程规划生成节点（集成 RAG 增强）"""
         try:
             request = state["request"]
             print(f"📋 行程规划节点：生成{request.city}的旅行计划")
@@ -298,12 +299,18 @@ class LangGraphTripPlanner:
             # 更新进度
             progress = state.get("progress", 0) + 40
 
+            # RAG 检索：根据城市和偏好获取相关知识
+            rag_context = self._retrieve_rag_context(request)
+            if rag_context:
+                print(f"  - RAG 检索到 {rag_context.count('知识')} 条相关知识")
+
             # 构建提示词
             query = self._build_planner_query(
                 request,
                 state["attractions"],
                 state["weather"],
-                state["hotels"]
+                state["hotels"],
+                rag_context
             )
 
             # 调用 LLM
@@ -330,8 +337,36 @@ class LangGraphTripPlanner:
                 "progress": state.get("progress", 0) + 40
             }
 
-    def _build_planner_query(self, request: TripRequest, attractions: str, weather: str, hotels: str = "") -> str:
-        """构建行程规划查询"""
+    def _retrieve_rag_context(self, request: TripRequest) -> str:
+        """RAG 检索相关知识
+
+        根据城市、偏好等信息检索旅行知识库，返回格式化上下文。
+        """
+        settings = get_settings()
+        if not settings.rag_enabled:
+            return ""
+
+        try:
+            rag = get_rag_service()
+
+            # 构建检索查询：结合城市和偏好
+            query_parts = [request.city]
+            if request.preferences:
+                query_parts.extend(request.preferences)
+            if request.free_text_input:
+                query_parts.append(request.free_text_input)
+
+            query = " ".join(query_parts)
+            k = settings.rag_retrieval_k
+
+            context = rag.retrieve_as_context(query, k=k)
+            return context
+        except Exception as e:
+            print(f"⚠️  RAG 检索异常（已跳过）: {str(e)}")
+            return ""
+
+    def _build_planner_query(self, request: TripRequest, attractions: str, weather: str, hotels: str = "", rag_context: str = "") -> str:
+        """构建行程规划查询（集成 RAG 知识）"""
         query = f"""请根据以下信息生成{request.city}的{request.travel_days}天旅行计划:
 
 **基本信息:**
@@ -350,14 +385,21 @@ class LangGraphTripPlanner:
 
 **酒店信息:**
 {hotels}
+"""
+        if rag_context:
+            query += f"""
+**旅行知识库参考（请结合这些知识优化行程）:**
+{rag_context}
 
-**要求:**
+"""
+        query += """**要求:**
 1. 每天安排 2-3 个景点
 2. 每天必须包含早中晚三餐
 3. 每天推荐一个具体的酒店 (从酒店信息中选择)
 4. 考虑景点之间的距离和交通方式
 5. 返回完整的 JSON 格式数据
 6. 景点的经纬度坐标要真实准确
+7. 结合旅行知识库中的建议，优化行程安排、餐饮推荐和预算规划
 """
         if request.free_text_input:
             query += f"\n**额外要求:** {request.free_text_input}"
@@ -447,8 +489,7 @@ class LangGraphTripPlanner:
             }
 
             # 使用 LangGraph 原生流式执行
-            # stream_mode="updates" 会在每个节点执行后返回更新
-            # stream_mode="values" 会返回完整状态
+            # stream_mode=["updates", "values"] 同时返回节点更新和最终状态
             progress_map = {
                 "attraction_search": (15, "🔍 正在搜索景点信息..."),
                 "weather_search": (25, "🌤️  正在查询天气信息..."),
@@ -456,26 +497,35 @@ class LangGraphTripPlanner:
                 "plan_generator": (50, "📋 正在生成行程计划..."),
             }
 
-            async for chunk in self.app.astream(initial_state, stream_mode="updates"):
-                # chunk 是一个字典，键是节点名，值是该节点的输出
-                for node_name, node_output in chunk.items():
-                    print(f"✅ 节点完成：{node_name}")
-                    
-                    # 发送进度更新
-                    if node_name in progress_map:
-                        progress, message = progress_map[node_name]
-                        yield {"type": "progress", "progress": progress, "message": message}
-                        
-                        # 如果有错误，也发送错误信息
-                        if "error" in node_output:
-                            yield {
-                                "type": "progress", 
-                                "progress": progress, 
-                                "message": f"⚠️ {node_name} 执行失败：{node_output.get('error', '未知错误')}"
-                            }
+            final_state = None
 
-            # 所有节点执行完成，获取最终状态
-            final_state = await self.app.ainvoke(initial_state)
+            # 使用多模式流式执行：updates 用于进度，values 用于最终状态
+            async for mode, chunk in self.app.astream(initial_state, stream_mode=["updates", "values"]):
+                if mode == "updates":
+                    # 处理节点更新（用于进度显示）
+                    for node_name, node_output in chunk.items():
+                        print(f"✅ 节点完成：{node_name}")
+                        
+                        # 发送进度更新
+                        if node_name in progress_map:
+                            progress, message = progress_map[node_name]
+                            yield {"type": "progress", "progress": progress, "message": message}
+                            
+                            # 如果有错误，也发送错误信息
+                            if "error" in node_output:
+                                yield {
+                                    "type": "progress", 
+                                    "progress": progress, 
+                                    "message": f"⚠️ {node_name} 执行失败：{node_output.get('error', '未知错误')}"
+                                }
+                
+                elif mode == "values":
+                    # 处理完整状态（用于获取最终结果）
+                    final_state = chunk
+
+            # 检查是否获取到最终状态
+            if not final_state:
+                raise Exception("未能获取最终状态")
             
             yield {"type": "progress", "progress": 80, "message": "🔄 正在解析和优化行程数据..."}
 
