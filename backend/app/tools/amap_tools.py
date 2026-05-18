@@ -161,6 +161,95 @@ def maps_weather(city: str) -> str:
 
 
 @tool
+def maps_direction_transit(origin: str, destination: str, city: str = "") -> str:
+    """
+    查询公交/地铁路线规划（支持跨城）
+
+    Args:
+        origin: 起点坐标，格式：经度，纬度 (如：116.397128,39.916527)
+        destination: 终点坐标，格式：经度，纬度
+        city: 城市名称或 adcode（同城查询时使用，如"北京"，跨城可不填）
+
+    Returns:
+        公交路线规划信息
+    """
+    api_key = get_amap_api_key()
+
+    url = "https://restapi.amap.com/v3/direction/transit/integrated"
+    params = {
+        "key": api_key,
+        "origin": origin,
+        "destination": destination,
+        "city": city,
+        "strategy": 0,
+        "extensions": "all",
+        "output": "JSON",
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("status") == "1":
+            route = data.get("route", {})
+            transits = route.get("transits", [])
+
+            if not transits:
+                return "未找到公交路线"
+
+            result_parts = []
+            for i, transit in enumerate(transits[:3]):
+                total_duration = int(transit.get("duration", 0) or 0)
+                total_price = float(transit.get("cost", 0) or 0)
+                walking_distance = int(transit.get("walking_distance", 0) or 0)
+                segments = transit.get("segments", [])
+
+                result_parts.append(f"\n方案{i+1}（预计{total_duration//60}分钟，费用{total_price:.0f}元，步行{walking_distance}米）:")
+
+                for seg in segments:
+                    if "bus" in seg and seg["bus"].get("buslines"):
+                        bus = seg["bus"]
+                        busline = bus["buslines"][0]
+                        line_name = busline.get("name", "未知线路")
+                        dep_stop = busline.get("departure_stop", "")
+                        arr_stop = busline.get("arrival_stop", "")
+                        if isinstance(dep_stop, dict):
+                            dep_stop = dep_stop.get("name", "")
+                        if isinstance(arr_stop, dict):
+                            arr_stop = arr_stop.get("name", "")
+                        via_num = busline.get("via_num", 0)
+                        if isinstance(via_num, str):
+                            via_num = int(via_num) if via_num.isdigit() else 0
+                        line_type = busline.get("bus_type", "") or busline.get("type", "")
+                        result_parts.append(f"   🚌 {line_name}")
+                        if line_type:
+                            result_parts.append(f"      {line_type}")
+                        result_parts.append(f"      上车: {dep_stop} → 下车: {arr_stop}（{via_num}站）")
+                    elif "walking" in seg:
+                        walk = seg["walking"]
+                        if isinstance(walk, dict):
+                            walk_dist = int(walk.get("distance", 0) or 0)
+                            walk_dur = int(walk.get("duration", 0) or 0)
+                            if walk_dist > 0:
+                                result_parts.append(f"   🚶 步行{walk_dist}米（约{walk_dur//60}分钟）")
+                    elif "railway" in seg:
+                        railway = seg["railway"]
+                        if isinstance(railway, dict):
+                            result_parts.append(f"   🚄 {railway.get('name', '铁路')}")
+
+            if len(transits) > 3:
+                result_parts.append(f"\n... 还有 {len(transits) - 3} 个方案未显示")
+
+            return "\n".join(result_parts)
+        else:
+            return f"公交路线查询失败：{data.get('info', '未知错误')}"
+
+    except Exception as e:
+        return f"公交路线查询出错：{str(e)}"
+
+
+@tool
 def maps_direction_driving(origin: str, destination: str) -> str:
     """
     查询驾车路线规划
@@ -212,4 +301,5 @@ def get_amap_tools() -> List:
         maps_text_search,
         maps_weather,
         maps_direction_driving,
+        maps_direction_transit,
     ]
