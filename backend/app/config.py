@@ -148,6 +148,28 @@ class Settings(BaseSettings):
         """获取RAG是否启用"""
         return os.getenv("RAG_ENABLED", "true").lower() == "true"
 
+    # ============ Neo4j 知识图谱配置 ============
+
+    @property
+    def neo4j_uri(self) -> str:
+        return os.getenv("NEO4J_URI") or ""
+
+    @property
+    def neo4j_username(self) -> str:
+        return os.getenv("NEO4J_USERNAME") or ""
+
+    @property
+    def neo4j_password(self) -> str:
+        return os.getenv("NEO4J_PASSWORD") or ""
+
+    @property
+    def neo4j_database(self) -> str:
+        return os.getenv("NEO4J_DATABASE") or ""
+
+    @property
+    def kg_enabled(self) -> bool:
+        return bool(self.neo4j_uri and self.neo4j_username and self.neo4j_password)
+
 
 # 创建全局配置实例
 settings = Settings()

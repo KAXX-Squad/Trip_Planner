@@ -433,6 +433,83 @@ def cmd_health(args: argparse.Namespace):
     print(f"\n{'='*60}\n")
 
 
+def cmd_kg(args: argparse.Namespace):
+    """知识图谱命令"""
+    from app.services.knowledge_graph import get_kg_service
+
+    kg = get_kg_service()
+
+    if not kg.is_connected():
+        print("❌ 无法连接到 Neo4j，请检查 NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD 配置")
+        return
+
+    if args.kg_action == "build":
+        kg.build_from_files()
+    elif args.kg_action == "info":
+        stats = kg.query.get_stats()
+        print(f"\n{'='*60}")
+        print(f"📊 旅行知识图谱统计")
+        print(f"{'='*60}")
+        print(f"\n  节点类型:")
+        for label, count in sorted(stats["node_counts"].items(), key=lambda x: -x[1]):
+            print(f"    {label:15s} {count:>4} 个")
+        print(f"\n  关系类型:")
+        for rel_type, count in sorted(stats["relationship_counts"].items(), key=lambda x: -x[1]):
+            print(f"    {rel_type:20s} {count:>4} 条")
+        total_nodes = sum(stats["node_counts"].values())
+        total_rels = sum(stats["relationship_counts"].values())
+        print(f"\n  总计: {total_nodes} 个节点, {total_rels} 条关系\n")
+    elif args.kg_action == "query":
+        if args.city:
+            info = kg.query.get_city_info(args.city)
+            if info:
+                print(f"\n{'='*60}")
+                print(f"📍 {info['name']}")
+                print(f"{'='*60}")
+                if info.get("budget"):
+                    print(f"  预算: {info['budget']}")
+                if info.get("suggest_days"):
+                    print(f"  建议天数: {info['suggest_days']}")
+                if info.get("transportation"):
+                    print(f"  交通: {info['transportation']}")
+                if info.get("accommodation"):
+                    print(f"  住宿: {info['accommodation']}")
+                if info.get("attractions"):
+                    print(f"\n  🏛  必游景点:")
+                    for a in info["attractions"]:
+                        print(f"     - {a}")
+                if info.get("cuisines"):
+                    print(f"\n  🍜 特色美食:")
+                    for c in info["cuisines"]:
+                        print(f"     - {c}")
+                if info.get("best_seasons"):
+                    print(f"\n  🌤  最佳季节:")
+                    for s in info["best_seasons"]:
+                        print(f"     - {s}")
+            else:
+                print(f"❌ 未找到城市「{args.city}」的信息")
+        elif args.season:
+            cities = kg.query.recommend_by_season(args.season)
+            if cities:
+                print(f"\n{'='*60}")
+                print(f"🌤  {args.season}推荐目的地")
+                print(f"{'='*60}")
+                for c in cities:
+                    print(f"\n  📍 {c['name']} ({c.get('budget', '')})")
+                    if c.get("attractions"):
+                        print(f"     景点: {', '.join(c['attractions'][:4])}")
+                    if c.get("cuisines"):
+                        print(f"     美食: {', '.join(c['cuisines'][:4])}")
+            else:
+                print(f"未找到 {args.season} 的推荐目的地")
+        else:
+            print("⚠️  请指定 --city 或 --season 参数查询")
+            print("   示例: python cli.py kg query --city 北京")
+            print("         python cli.py kg query --season 春季")
+
+    kg.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器"""
     parser = argparse.ArgumentParser(
@@ -467,6 +544,18 @@ def build_parser() -> argparse.ArgumentParser:
   
   # 系统诊断
   python cli.py health
+  
+  # 知识图谱：构建
+  python cli.py kg build
+  
+  # 知识图谱：查询城市信息
+  python cli.py kg query --city 杭州
+  
+  # 知识图谱：按季节推荐
+  python cli.py kg query --season 春季
+  
+  # 知识图谱：统计信息
+  python cli.py kg info
         """,
     )
 
@@ -571,6 +660,17 @@ def build_parser() -> argparse.ArgumentParser:
         description="检查所有服务的运行状态和配置完整性。",
     )
 
+    # ===== kg =====
+    p_kg = subparsers.add_parser(
+        "kg", aliases=["knowledge-graph"],
+        help="🔗 知识图谱（基于 Neo4j）",
+        description="基于 Neo4j 的旅行知识图谱，支持城市、景点、美食、季节关系查询。",
+    )
+    p_kg.add_argument("kg_action", choices=["build", "query", "info"],
+                       help="操作: build=构建图谱, query=查询, info=统计信息")
+    p_kg.add_argument("--city", default="", help="查询城市信息，如：北京")
+    p_kg.add_argument("--season", default="", help="按季节推荐目的地，如：春季")
+
     return parser
 
 
@@ -608,6 +708,8 @@ def main():
         "health": cmd_health,
         "diag": cmd_health,
         "status": cmd_health,
+        "kg": cmd_kg,
+        "knowledge-graph": cmd_kg,
     }
 
     handler = command_map.get(args.command)
