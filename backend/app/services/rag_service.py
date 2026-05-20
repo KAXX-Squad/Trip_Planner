@@ -209,6 +209,10 @@ class RAGService:
         documents = []
 
         md_files = glob.glob(str(data_dir / "*.md"))
+        # 也加载 memory 子目录中的记忆文件
+        memory_dir = data_dir / "memory"
+        if memory_dir.exists():
+            md_files += glob.glob(str(memory_dir / "*.md"))
         if not md_files:
             print("⚠️  未找到知识文档文件")
             return documents

@@ -299,6 +299,59 @@ class KnowledgeGraphBuilder:
                     city_name=city_name,
                 )
 
+    def upsert_city(self, city_name: str, attractions: List[dict], cuisines: List[str] = None):
+        """增量更新城市节点及其关联的景点和美食
+
+        旅行规划后调用，将记忆同步到知识图谱，避免全量重建。
+        """
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """MERGE (c:City {name: $name})
+                   SET c.source = $source""",
+                name=city_name,
+                source="memory",
+            )
+
+            added_attr = 0
+            added_cuisine = 0
+            for a in attractions:
+                a_name = a.get("name", "")
+                a_cat = a.get("category", "景点")
+                a_addr = a.get("address", "")
+                if not a_name:
+                    continue
+                result = session.run(
+                    """MERGE (a:Attraction {name: $name})
+                       SET a.category = $category,
+                           a.address = $address
+                       WITH a
+                       MATCH (c:City {name: $city_name})
+                       MERGE (c)-[:HAS_ATTRACTION]->(a)
+                       RETURN a.name AS name""",
+                    name=a_name,
+                    category=a_cat,
+                    address=a_addr,
+                    city_name=city_name,
+                )
+                if result.single():
+                    added_attr += 1
+
+            if cuisines:
+                for c_name in cuisines:
+                    if not c_name:
+                        continue
+                    session.run(
+                        """MERGE (cu:Cuisine {name: $name})
+                           WITH cu
+                           MATCH (c:City {name: $city_name})
+                           MERGE (c)-[:KNOWN_FOR]->(cu)""",
+                        name=c_name,
+                        city_name=city_name,
+                    )
+                    added_cuisine += 1
+
+            print(f"  - 已同步到知识图谱: {city_name} ({added_attr} 景点, {added_cuisine} 美食)")
+
 
 # ============ 知识图谱查询器 ============
 
@@ -515,6 +568,17 @@ class KnowledgeGraphService:
         print(f"\n✅ 知识图谱构建完成!")
         print(f"   节点: {total_nodes} 个 ({', '.join(f'{k}: {v}' for k, v in stats['node_counts'].items())})")
         print(f"   关系: {total_rels} 条")
+        return True
+
+    def sync_city_memory(self, city_name: str, attractions: List[dict], cuisines: List[str] = None):
+        """将长期记忆中的城市信息同步到知识图谱
+
+        旅行规划后自动调用，无需全量重建。
+        """
+        if not self.is_connected():
+            return False
+        builder = KnowledgeGraphBuilder(self.driver, self.settings.neo4j_database)
+        builder.upsert_city(city_name, attractions, cuisines)
         return True
 
     def close(self):

@@ -510,6 +510,54 @@ def cmd_kg(args: argparse.Namespace):
     kg.close()
 
 
+def cmd_memory(args: argparse.Namespace):
+    """长期记忆管理命令"""
+    from app.services.memory_service import get_memory_service
+
+    memory = get_memory_service()
+
+    if args.mem_action == "list":
+        mems = memory.get_all_memories()
+        if not mems:
+            print("\n📭 记忆库为空，进行旅行规划后会自动生成记忆。")
+            return
+        print(f"\n{'='*60}")
+        print(f"💾 长期记忆 ({len(mems)} 条)")
+        print(f"{'='*60}")
+        for m in mems:
+            icon = "🏙" if m["file"].startswith("city_") else "🏛"
+            print(f"  {icon} {m['title']}")
+            print(f"     文件: {m['file']}")
+            print(f"     来源: {m['source']} | 时间: {m['time']}")
+            print()
+
+    elif args.mem_action == "search":
+        results = memory.search_memories(args.query)
+        if not results:
+            print(f"\n🔍 未找到与「{args.query}」相关的记忆")
+            return
+        print(f"\n{'='*60}")
+        print(f"🔍 搜索「{args.query}」({len(results)} 条匹配)")
+        print(f"{'='*60}")
+        for r in results[:10]:
+            print(f"\n  📄 {r['title']}")
+            print(f"     {r['excerpt'][:120]}...")
+
+    elif args.mem_action == "rebuild":
+        memory.rebuild_index()
+        print("\n✅ 记忆索引已重建")
+
+    elif args.mem_action == "guide":
+        guide = memory.collect_knowledge_into_guide()
+        if guide:
+            print(f"\n📖 已生成用户城市指南:")
+            print(guide[:500] + "\n...")
+        else:
+            print("\n📭 暂无记忆可生成指南")
+
+    memory = None
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器"""
     parser = argparse.ArgumentParser(
@@ -556,6 +604,15 @@ def build_parser() -> argparse.ArgumentParser:
   
   # 知识图谱：统计信息
   python cli.py kg info
+  
+  # 长期记忆：查看所有记忆
+  python cli.py memory list
+  
+  # 长期记忆：搜索记忆
+  python cli.py memory search 成都
+  
+  # 长期记忆：生成用户城市指南
+  python cli.py memory guide
         """,
     )
 
@@ -671,6 +728,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_kg.add_argument("--city", default="", help="查询城市信息，如：北京")
     p_kg.add_argument("--season", default="", help="按季节推荐目的地，如：春季")
 
+    # ===== memory =====
+    p_mem = subparsers.add_parser(
+        "memory", aliases=["mem"],
+        help="💾 长期记忆管理",
+        description="管理系统的长期记忆。旅行规划后自动保存城市和景点信息，下次可直接检索。",
+    )
+    p_mem.add_argument("mem_action", choices=["list", "search", "rebuild", "guide"],
+                        help="操作: list=列出记忆, search=搜索记忆, rebuild=重建索引, guide=生成城市指南")
+    p_mem.add_argument("query", nargs="?", default="",
+                        help="搜索关键词（仅 search 操作需要）")
+
     return parser
 
 
@@ -710,6 +778,8 @@ def main():
         "status": cmd_health,
         "kg": cmd_kg,
         "knowledge-graph": cmd_kg,
+        "memory": cmd_memory,
+        "mem": cmd_memory,
     }
 
     handler = command_map.get(args.command)

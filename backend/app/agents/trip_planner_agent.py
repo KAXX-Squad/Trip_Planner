@@ -150,6 +150,13 @@ class LangGraphTripPlanner:
             self.llm = get_llm()
             self.tools = get_amap_tools()
 
+            # 添加长期记忆工具
+            try:
+                from ..tools.memory_tools import get_memory_tools
+                self.tools += get_memory_tools()
+            except Exception:
+                pass
+
             # 创建带工具的 LLM
             self.llm_with_tools = self._create_llm_with_tools()
 
@@ -445,6 +452,14 @@ class LangGraphTripPlanner:
             # 解析最终计划
             trip_plan = self._parse_response(result["plan"], request)
 
+            # 保存到长期记忆（提取稳定的城市和景点信息）
+            try:
+                from ..services.memory_service import get_memory_service
+                memory = get_memory_service()
+                memory.save_from_trip_plan(trip_plan)
+            except Exception as mem_err:
+                print(f"⚠️  保存记忆失败（不影响行程）: {str(mem_err)[:100]}")
+
             print(f"{'='*60}")
             print(f"✅ 旅行计划生成完成!")
             print(f"{'='*60}\n")
@@ -531,6 +546,14 @@ class LangGraphTripPlanner:
 
             # 解析最终计划
             trip_plan = self._parse_response(final_state["plan"], request)
+
+            # 保存到长期记忆
+            try:
+                from ..services.memory_service import get_memory_service
+                memory = get_memory_service()
+                memory.save_from_trip_plan(trip_plan)
+            except Exception:
+                pass
 
             print(f"{'='*60}")
             print(f"✅ 旅行计划生成完成!")
