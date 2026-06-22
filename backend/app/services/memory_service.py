@@ -1,7 +1,7 @@
 """长期记忆服务 - 将搜索结果保存为 Markdown 记忆文档
 
 每次旅行规划或搜索后，将稳定的知识（城市信息、景点信息）
-持久化为 Markdown 文件，RAG 初始化时自动加载，实现"用过即学"。
+持久化为 Markdown 文件，同时自动同步到 Qdrant 向量数据库。
 """
 
 import os
@@ -10,6 +10,7 @@ import glob
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional
+from langchain_core.documents import Document
 from ..config import get_settings
 
 
@@ -19,13 +20,29 @@ MEMORY_DIR = Path(__file__).parent.parent / "data" / "memory"
 class MemoryService:
     """长期记忆服务
 
-    将搜索结果中的稳定知识（城市信息、景点信息）保存为 Markdown 文件。
-    所有记忆文件存放在 data/memory/ 目录下，RAG 初始化时自动加载。
+    将搜索结果中的稳定知识（城市信息、景点信息）保存为 Markdown 文件，
+    同时自动同步到 Qdrant 向量数据库，实现"用过即学"。
     """
 
     def __init__(self):
         self.settings = get_settings()
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _sync_to_qdrant(self, file_path: str):
+        """将单个记忆文件同步到 Qdrant 向量数据库"""
+        try:
+            from .rag_service import get_rag_service
+            rag = get_rag_service()
+            if rag._initialized:
+                content = Path(file_path).read_text(encoding="utf-8")
+                filename = os.path.basename(file_path)
+                doc = Document(
+                    page_content=content,
+                    metadata={"source": filename, "file_path": str(file_path)}
+                )
+                rag.add_documents([doc])
+        except Exception as e:
+            print(f"  ⚠️  同步到 Qdrant 失败（不影响文件保存）: {str(e)[:100]}")
 
     # ============ 保存记忆 ============
 
@@ -94,6 +111,9 @@ class MemoryService:
         filepath.write_text(content, encoding="utf-8")
         print(f"💾 已保存城市记忆: {city} → {filepath.name}")
 
+        # 同步到 Qdrant 向量数据库
+        self._sync_to_qdrant(str(filepath))
+
         # 同步到知识图谱
         try:
             from .knowledge_graph import get_kg_service
@@ -159,6 +179,8 @@ class MemoryService:
             filepath = MEMORY_DIR / filename
             filepath.write_text(content, encoding="utf-8")
             print(f"💾 已保存景点记忆: {name} → {filepath.name}")
+            # 同步到 Qdrant 向量数据库
+            self._sync_to_qdrant(str(filepath))
             saved.append(str(filepath))
 
         return saved

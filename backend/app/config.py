@@ -148,6 +148,33 @@ class Settings(BaseSettings):
         """获取RAG是否启用"""
         return os.getenv("RAG_ENABLED", "true").lower() == "true"
 
+    # ============ Qdrant 向量数据库配置 ============
+
+    @property
+    def qdrant_mode(self) -> str:
+        """获取Qdrant运行模式: local / memory / cloud"""
+        return (os.getenv("QDRANT_MODE") or "local").lower()
+
+    @property
+    def qdrant_path(self) -> str:
+        """获取Qdrant本地持久化路径"""
+        return os.getenv("QDRANT_PATH") or "./qdrant_data"
+
+    @property
+    def qdrant_collection(self) -> str:
+        """获取Qdrant集合名称"""
+        return os.getenv("QDRANT_COLLECTION") or "trip_planner"
+
+    @property
+    def qdrant_url(self) -> str:
+        """获取Qdrant远程服务器地址"""
+        return os.getenv("QDRANT_URL") or ""
+
+    @property
+    def qdrant_api_key(self) -> str:
+        """获取Qdrant远程API Key"""
+        return os.getenv("QDRANT_API_KEY") or ""
+
     # ============ Neo4j 知识图谱配置 ============
 
     @property
@@ -270,6 +297,9 @@ def print_config():
         print(f"  文档块大小: {settings.rag_chunk_size}")
         print(f"  文档块重叠: {settings.rag_chunk_overlap}")
         print(f"  检索数量: {settings.rag_retrieval_k}")
+        print(f"  向量数据库: Qdrant ({settings.qdrant_mode})")
+        if settings.qdrant_mode == "local":
+            print(f"  持久化路径: {settings.qdrant_path}")
     
     print(f"\n日志级别: {settings.log_level}")
 

@@ -555,6 +555,19 @@ def cmd_memory(args: argparse.Namespace):
         else:
             print("\n📭 暂无记忆可生成指南")
 
+    elif args.mem_action == "sync":
+        print(f"\n{'='*60}")
+        print(f"  同步记忆文件到 Qdrant 向量数据库")
+        print(f"{'='*60}")
+        from app.services.rag_service import get_rag_service
+        # 强制重新初始化，确保使用当前的 Embedding 配置
+        rag = get_rag_service(force_reinit=True)
+        count = rag.sync_memories_to_qdrant()
+        if count > 0:
+            print(f"\n  成功同步 {count} 个记忆文档块到 Qdrant")
+        else:
+            print("\n  没有记忆需要同步，或同步失败")
+
     memory = None
 
 
@@ -734,8 +747,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="💾 长期记忆管理",
         description="管理系统的长期记忆。旅行规划后自动保存城市和景点信息，下次可直接检索。",
     )
-    p_mem.add_argument("mem_action", choices=["list", "search", "rebuild", "guide"],
-                        help="操作: list=列出记忆, search=搜索记忆, rebuild=重建索引, guide=生成城市指南")
+    p_mem.add_argument("mem_action", choices=["list", "search", "rebuild", "guide", "sync"],
+                        help="操作: list=列出记忆, search=搜索记忆, rebuild=重建索引, guide=生成城市指南, sync=同步到Qdrant")
     p_mem.add_argument("query", nargs="?", default="",
                         help="搜索关键词（仅 search 操作需要）")
 

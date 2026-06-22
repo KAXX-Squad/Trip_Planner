@@ -4,23 +4,30 @@
 1. HuggingFace 本地模型（默认，无需 API Key，需下载模型）
 2. OpenAI 兼容 API（复用 LLM 配置，需 API 支持 Embedding）
 3. TF-IDF 关键词检索（纯本地，零依赖，始终可用）
+
+向量数据库使用 Qdrant：
+- local 模式：本地持久化，无需外部服务
+- memory 模式：仅内存，适合测试
+- cloud 模式：连接远程 Qdrant 服务器
 """
 
 import os
 import glob
-import numpy as np
 from pathlib import Path
 from typing import List, Optional
-from langchain_community.vectorstores import FAISS
+from langchain_qdrant import QdrantVectorStore
+from qdrant_client import QdrantClient
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from ..config import get_settings
 
 
-class TfidfEmbedding:
+class TfidfEmbedding(Embeddings):
     """基于 TF-IDF 的简单 Embedding（纯本地实现，无需下载任何模型）
 
     兼容 LangChain Embeddings 接口：embed_documents, embed_query
+    注意：embed_documents 首次调用会训练（fit），之后调用仅转换（transform）。
     """
 
     def __init__(self):
@@ -33,8 +40,11 @@ class TfidfEmbedding:
         self._fitted = False
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        embeddings = self.vectorizer.fit_transform(texts).toarray().tolist()
-        self._fitted = True
+        if not self._fitted:
+            embeddings = self.vectorizer.fit_transform(texts).toarray().tolist()
+            self._fitted = True
+        else:
+            embeddings = self.vectorizer.transform(texts).toarray().tolist()
         return embeddings
 
     def embed_query(self, text: str) -> List[float]:
@@ -47,7 +57,7 @@ class TfidfEmbedding:
         return self.embed_query(text)
 
 
-class DashScopeEmbedding:
+class DashScopeEmbedding(Embeddings):
     """基于通义千问 DashScope API 的 Embedding
 
     兼容 LangChain Embeddings 接口
@@ -102,17 +112,22 @@ class DashScopeEmbedding:
 
 
 class RAGService:
-    """基于 FAISS 向量数据库的 RAG 检索服务
+    """基于 Qdrant 向量数据库的 RAG 检索服务
 
-    加载旅行知识文档，构建向量索引，并提供语义检索能力。
+    加载旅行知识文档，构建 Qdrant 向量索引，并提供语义检索能力。
     检索到的知识将被注入到 LLM 提示词中，增强生成质量。
+
+    支持三种 Qdrant 运行模式:
+    - local: 本地持久化（默认），数据存储在磁盘上
+    - memory: 仅内存模式，适合测试
+    - cloud: 连接远程 Qdrant 服务器
     """
 
     def __init__(self):
         self.settings = get_settings()
         self.embedding_model = None
         self.embedding_provider = None
-        self.vector_store: Optional[FAISS] = None
+        self.vector_store: Optional[QdrantVectorStore] = None
         self._initialized = False
 
     def _init_embeddings(self):
@@ -144,9 +159,10 @@ class RAGService:
 
         has_api_key = bool(self.settings.openai_api_key)
         is_dashscope = "dashscope" in (self.settings.openai_base_url or "").lower()
-        
-        # 如果是通义千问 API，先尝试原生 DashScope Embedding
-        if is_dashscope and has_api_key:
+
+        # 如果用户配置 openai 或 tfidf，跳过 DashScope 原生 API
+        # 否则如果是通义千问 API，先尝试原生 DashScope Embedding
+        if provider not in ("openai", "tfidf") and is_dashscope and has_api_key:
             dashscope_models = ["text-embedding-v2", "text-embedding-v1"]
             for ds_model in dashscope_models:
                 try:
@@ -163,7 +179,7 @@ class RAGService:
                 except Exception as e:
                     print(f"  ⚠️ DashScope 模型 {ds_model} 不可用：{str(e)[:100]}")
                     continue
-        
+
         # 尝试 OpenAI 兼容 API
         if provider == "openai" or (has_api_key and provider == "huggingface"):
             # 通义千问等 OpenAI 兼容 API 的 Embedding 模型列表
@@ -204,7 +220,7 @@ class RAGService:
         return TfidfEmbedding()
 
     def _load_documents(self) -> List[Document]:
-        """加载知识文档目录中的所有文档"""
+        """加载知识文档目录中的所有文档（含 memory 子目录）"""
         data_dir = Path(__file__).parent.parent / "data"
         documents = []
 
@@ -234,6 +250,37 @@ class RAGService:
 
         return documents
 
+    def _load_memory_documents(self) -> List[Document]:
+        """只加载 memory 子目录中的记忆文档"""
+        memory_dir = Path(__file__).parent.parent / "data" / "memory"
+        documents = []
+
+        if not memory_dir.exists():
+            print("⚠️  memory 目录不存在")
+            return documents
+
+        md_files = glob.glob(str(memory_dir / "*.md"))
+        if not md_files:
+            print("⚠️  未找到记忆文件")
+            return documents
+
+        for file_path in md_files:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+
+                filename = os.path.basename(file_path)
+                doc = Document(
+                    page_content=content,
+                    metadata={"source": filename, "file_path": str(file_path)}
+                )
+                documents.append(doc)
+                print(f"  - 加载记忆: {filename}")
+            except Exception as e:
+                print(f"❌ 加载记忆失败 {file_path}: {str(e)}")
+
+        return documents
+
     def _split_documents(self, documents: List[Document]) -> List[Document]:
         """将文档分割成更小的块，便于检索"""
         text_splitter = RecursiveCharacterTextSplitter(
@@ -246,13 +293,49 @@ class RAGService:
         print(f"  - 文档分割完成: {len(documents)} 个文档 -> {len(chunks)} 个块")
         return chunks
 
+    def _get_qdrant_client(self):
+        """创建 QdrantClient 实例"""
+        mode = self.settings.qdrant_mode
+        if mode == "cloud":
+            return QdrantClient(
+                url=self.settings.qdrant_url,
+                api_key=self.settings.qdrant_api_key,
+            )
+        elif mode == "local":
+            qdrant_path = self.settings.qdrant_path
+            os.makedirs(qdrant_path, exist_ok=True)
+            return QdrantClient(path=qdrant_path)
+        else:  # memory 模式
+            return QdrantClient(location=":memory:")
+
+    def _get_qdrant_connection_kwargs(self) -> dict:
+        """获取 Qdrant 连接参数字典（用于 from_documents 透传）"""
+        mode = self.settings.qdrant_mode
+        if mode == "cloud":
+            return {
+                "url": self.settings.qdrant_url,
+                "api_key": self.settings.qdrant_api_key,
+            }
+        elif mode == "local":
+            qdrant_path = self.settings.qdrant_path
+            os.makedirs(qdrant_path, exist_ok=True)
+            return {"path": qdrant_path}
+        else:  # memory 模式
+            return {"location": ":memory:"}
+
+    def _collection_exists(self, connection_kwargs: dict, collection_name: str) -> bool:
+        """检查 Qdrant 集合是否已存在"""
+        client = QdrantClient(**connection_kwargs)
+        existing = client.get_collections().collections
+        return collection_name in [c.name for c in existing]
+
     def initialize(self) -> bool:
         """初始化向量存储
 
-        加载文档 -> 分割 -> 嵌入 -> 构建 FAISS 索引
+        加载文档 -> 分割 -> 嵌入 -> 构建 Qdrant 索引（或连接已有索引）
         """
         try:
-            print("🔄 初始化 RAG 向量存储...")
+            print("🔄 初始化 RAG 向量存储 (Qdrant)...")
 
             documents = self._load_documents()
             if not documents:
@@ -264,15 +347,47 @@ class RAGService:
             if self.embedding_model is None:
                 self.embedding_model = self._init_embeddings()
 
-            print(f"  - 生成向量索引...")
-            self.vector_store = FAISS.from_documents(
-                documents=chunks,
-                embedding=self.embedding_model,
-            )
+            connection_kwargs = self._get_qdrant_connection_kwargs()
+            collection_name = self.settings.qdrant_collection
+
+            # 检查集合是否已存在
+            if self._collection_exists(connection_kwargs, collection_name):
+                print(f"  - 连接已有 Qdrant 集合: {collection_name}")
+                try:
+                    # QdrantVectorStore.__init__() 需要 client 实例
+                    client = self._get_qdrant_client()
+                    self.vector_store = QdrantVectorStore(
+                        client=client,
+                        collection_name=collection_name,
+                        embedding=self.embedding_model,
+                    )
+                except Exception as conn_err:
+                    # 如果连接失败（如向量维度不匹配），删除集合并重建
+                    print(f"  ⚠️ 连接已有集合失败: {conn_err}")
+                    print(f"  - 删除并重建集合: {collection_name}")
+                    client = self._get_qdrant_client()
+                    client.delete_collection(collection_name)
+                    self.vector_store = QdrantVectorStore.from_documents(
+                        documents=chunks,
+                        embedding=self.embedding_model,
+                        collection_name=collection_name,
+                        **connection_kwargs,
+                    )
+            else:
+                print(f"  - 新建 Qdrant 集合: {collection_name}")
+                print(f"  - 生成向量索引...")
+                # from_documents() 接受原始的连接参数（url/path/location）
+                self.vector_store = QdrantVectorStore.from_documents(
+                    documents=chunks,
+                    embedding=self.embedding_model,
+                    collection_name=collection_name,
+                    **connection_kwargs,
+                )
 
             self._initialized = True
             provider_name = self.embedding_provider or "unknown"
-            print(f"✅ RAG 向量存储初始化成功 (共 {len(chunks)} 个文档块, Embedding: {provider_name})")
+            mode_name = self.settings.qdrant_mode
+            print(f"✅ RAG 向量存储初始化成功 (集合: {collection_name}, 模式: {mode_name}, Embedding: {provider_name})")
             return True
 
         except Exception as e:
@@ -327,16 +442,91 @@ class RAGService:
 
         return "\n\n".join(context_parts)
 
+    def add_documents(self, documents: List[Document]) -> int:
+        """增量添加文档到已有的 Qdrant 向量存储
+
+        先分割文档，再添加到已有集合中，无需重建索引。
+
+        Args:
+            documents: 待添加的文档列表
+
+        Returns:
+            成功添加的文档块数量
+        """
+        if not documents:
+            return 0
+
+        # 确保已初始化
+        if not self._initialized or self.vector_store is None:
+            success = self.initialize()
+            if not success:
+                print("❌ RAG 未初始化，无法添加文档")
+                return 0
+
+        try:
+            chunks = self._split_documents(documents)
+            # QdrantVectorStore.add_documents() 会直接嵌入并插入到已有集合
+            self.vector_store.add_documents(chunks)
+            print(f"✅ 已添加 {len(chunks)} 个文档块到 Qdrant 集合")
+            return len(chunks)
+        except Exception as e:
+            print(f"❌ 添加文档到 Qdrant 失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return 0
+
+    def sync_memories_to_qdrant(self) -> int:
+        """将 memory 目录中的所有记忆文档同步到 Qdrant
+
+        读取 data/memory/ 下的所有 .md 文件，分割后添加到 Qdrant 向量存储。
+
+        Returns:
+            成功同步的文档块数量
+        """
+        print("🔄 同步记忆到 Qdrant...")
+
+        documents = self._load_memory_documents()
+        if not documents:
+            print("⚠️  没有记忆文件需要同步")
+            return 0
+
+        return self.add_documents(documents)
+
+    def sync_all_to_qdrant(self) -> int:
+        """重新构建整个 Qdrant 索引（全量同步）
+
+        重新加载 data/ 下所有文档（含 memory），并重建 Qdrant 集合。
+        注意：这会清空原有集合并重建。
+
+        Returns:
+            索引的文档块数量
+        """
+        print("🔄 全量重建 Qdrant 索引...")
+        self._initialized = False
+        self.vector_store = None
+        success = self.initialize()
+        if success:
+            print("✅ 全量同步完成")
+            return len(self.vector_store.client.count(self.settings.qdrant_collection).count)
+        return 0
+
 
 # 全局 RAG 服务实例
 _rag_service: Optional[RAGService] = None
 
 
-def get_rag_service() -> RAGService:
-    """获取 RAG 服务实例（单例模式）"""
+def get_rag_service(force_reinit: bool = False) -> RAGService:
+    """获取 RAG 服务实例（单例模式）
+
+    Args:
+        force_reinit: 是否强制重新初始化
+
+    Returns:
+        RAGService 实例
+    """
     global _rag_service
 
-    if _rag_service is None:
+    if _rag_service is None or force_reinit:
         _rag_service = RAGService()
         _rag_service.initialize()
 
