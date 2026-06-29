@@ -9,10 +9,16 @@
 - local 模式：本地持久化，无需外部服务
 - memory 模式：仅内存，适合测试
 - cloud 模式：连接远程 Qdrant 服务器
+
+支持多路召回：
+- 向量检索（语义相似度）
+- BM25 检索（关键词精确匹配）
+- 混合检索（RRF 融合 BM25 + 向量）
 """
 
 import os
 import glob
+import re
 from pathlib import Path
 from typing import List, Optional
 from langchain_qdrant import QdrantVectorStore
@@ -129,6 +135,10 @@ class RAGService:
         self.embedding_provider = None
         self.vector_store: Optional[QdrantVectorStore] = None
         self._initialized = False
+        # BM25 相关
+        self._bm25_index = None
+        self._bm25_chunks: List[Document] = []
+        self._bm25_tokenizer = None
 
     def _init_embeddings(self):
         """初始化 Embedding 模型
@@ -157,8 +167,13 @@ class RAGService:
             except Exception as e:
                 print(f"  ⚠️ HuggingFace Embedding 加载失败: {str(e)}")
 
-        has_api_key = bool(self.settings.openai_api_key)
+        has_api_key = bool(self.settings.openai_api_key or self.settings.rag_embedding_api_key)
         is_dashscope = "dashscope" in (self.settings.openai_base_url or "").lower()
+
+        # 判断 Embedding 专属 API 配置（如 Ollama）
+        embedding_base_url = self.settings.rag_embedding_base_url or self.settings.openai_base_url
+        # Ollama 等本地服务不需要 API Key，但 OpenAI SDK 要求非空，用占位符
+        embedding_api_key = self.settings.rag_embedding_api_key or self.settings.openai_api_key or "ollama-placeholder"
 
         # 如果用户配置 openai 或 tfidf，跳过 DashScope 原生 API
         # 否则如果是通义千问 API，先尝试原生 DashScope Embedding
@@ -182,24 +197,30 @@ class RAGService:
 
         # 尝试 OpenAI 兼容 API
         if provider == "openai" or (has_api_key and provider == "huggingface"):
-            # 通义千问等 OpenAI 兼容 API 的 Embedding 模型列表
-            embedding_models_to_try = [
-                model_name,  # 用户配置的模型
-                "text-embedding-v2",  # 通义千问常用 Embedding
-                "text-embedding-v1",  # 通义千问旧版
-                "text-embedding-ada-002",  # OpenAI 官方
-            ]
-            
-            for model_to_try in embedding_models_to_try:
+            # 如果有 RAG 专属的 Embedding URL/Key，使用用户指定的模型
+            if self.settings.rag_embedding_base_url or provider == "openai":
+                model_list = [model_name]
+            else:
+                # 否则尝试多个模型（兼容模式）
+                model_list = [
+                    model_name,
+                    "text-embedding-v2",
+                    "text-embedding-v1",
+                    "text-embedding-ada-002",
+                ]
+
+            for model_to_try in model_list:
                 if not model_to_try:
                     continue
                 try:
                     from langchain_openai import OpenAIEmbeddings
-                    print(f"  - 尝试 OpenAI API Embedding: {model_to_try}")
+                    print(f"  - 尝试 OpenAI API Embedding: {model_to_try} @ {embedding_base_url}")
                     embedding = OpenAIEmbeddings(
                         model=model_to_try,
-                        api_key=self.settings.openai_api_key,
-                        base_url=self.settings.openai_base_url,
+                        api_key=embedding_api_key,
+                        base_url=embedding_base_url,
+                        tiktoken_enabled=False,
+                        check_embedding_ctx_length=False,
                     )
                     embedding.embed_query("验证")
                     self.embedding_provider = "openai"
@@ -509,6 +530,147 @@ class RAGService:
             print("✅ 全量同步完成")
             return len(self.vector_store.client.count(self.settings.qdrant_collection).count)
         return 0
+
+    # ============ BM25 检索 ============
+
+    def _build_bm25_index(self):
+        """构建 BM25 关键词索引
+
+        读取 data/ 和 data/memory/ 下所有文档，创建 BM25 倒排索引。
+        """
+        from rank_bm25 import BM25Okapi
+
+        documents = self._load_documents()
+        if not documents:
+            print("⚠️  BM25 无文档可索引")
+            return False
+
+        chunks = self._split_documents(documents)
+        self._bm25_chunks = chunks
+
+        # 分词器：中文按字符、英文按单词
+        def _tokenize(text: str) -> List[str]:
+            # 中英文混合分词：按非字母数字字符切分，保留中文单字和英文单词
+            text_lower = text.lower()
+            # 提取英文单词
+            words = re.findall(r'[a-z]+', text_lower)
+            # 提取中文字符（单字）
+            chars = re.findall(r'[\u4e00-\u9fff]', text_lower)
+            return words + chars
+
+        self._bm25_tokenizer = _tokenize
+        tokenized_corpus = [_tokenize(doc.page_content) for doc in chunks]
+        self._bm25_index = BM25Okapi(tokenized_corpus)
+        print(f"  ✅ BM25 索引构建完成: {len(chunks)} 个文档块")
+        return True
+
+    def retrieve_bm25(self, query: str, k: int = 5) -> List[Document]:
+        """BM25 关键词检索
+
+        Args:
+            query: 查询文本
+            k: 返回的文档块数量
+
+        Returns:
+            相关文档块列表
+        """
+        if self._bm25_index is None:
+            self._build_bm25_index()
+
+        if self._bm25_index is None:
+            return []
+
+        tokenized_query = self._bm25_tokenizer(query)
+        scores = self._bm25_index.get_scores(tokenized_query)
+        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
+
+        results = []
+        for idx in top_indices:
+            if scores[idx] > 0:
+                doc = self._bm25_chunks[idx]
+                results.append(doc)
+
+        return results
+
+    def retrieve_hybrid(self, query: str, k: int = 5,
+                        vector_k: int = 10, bm25_k: int = 10,
+                        rrf_constant: int = 60) -> List[Document]:
+        """混合检索：BM25 + 向量检索，使用 RRF 融合排序
+
+        RRF (Reciprocal Rank Fusion) 公式:
+          score(d) = 1/(k + rank_vector(d)) + 1/(k + rank_bm25(d))
+
+        Args:
+            query: 查询文本
+            k: 最终返回的文档块数量
+            vector_k: 向量检索取 top-N
+            bm25_k: BM25 检索取 top-N
+            rrf_constant: RRF 常数 k（默认 60）
+
+        Returns:
+            混合排序后的文档块列表
+        """
+        # 1. 向量检索
+        vector_results = self.retrieve(query, k=vector_k)
+
+        # 2. BM25 检索
+        bm25_results = self.retrieve_bm25(query, k=bm25_k)
+
+        # 3. RRF 融合
+        rrf_scores = {}
+
+        for rank, doc in enumerate(vector_results):
+            doc_id = doc.metadata.get("source", "") + doc.page_content[:50]
+            if doc_id not in rrf_scores:
+                rrf_scores[doc_id] = {
+                    "doc": doc,
+                    "score": 0.0,
+                }
+            rrf_scores[doc_id]["score"] += 1.0 / (rrf_constant + rank + 1)
+
+        for rank, doc in enumerate(bm25_results):
+            doc_id = doc.metadata.get("source", "") + doc.page_content[:50]
+            if doc_id not in rrf_scores:
+                rrf_scores[doc_id] = {
+                    "doc": doc,
+                    "score": 0.0,
+                }
+            rrf_scores[doc_id]["score"] += 1.0 / (rrf_constant + rank + 1)
+
+        # 4. 按 RRF 分数排序
+        sorted_docs = sorted(rrf_scores.values(), key=lambda x: x["score"], reverse=True)
+
+        # 5. 去重：相同 source 只保留最高分
+        seen_sources = set()
+        deduped = []
+        for item in sorted_docs:
+            source = item["doc"].metadata.get("source", "")
+            if source not in seen_sources:
+                seen_sources.add(source)
+                deduped.append(item["doc"])
+
+        return deduped[:k]
+
+    def retrieve_hybrid_as_context(self, query: str, k: int = 5) -> str:
+        """混合检索并格式化为上下文文本
+
+        Args:
+            query: 查询文本
+            k: 返回的文档块数量
+
+        Returns:
+            格式化后的上下文文本
+        """
+        docs = self.retrieve_hybrid(query, k=k)
+        if not docs:
+            return ""
+
+        context_parts = []
+        for i, doc in enumerate(docs):
+            source = doc.metadata.get("source", "未知来源")
+            context_parts.append(f"[知识 {i+1}] (来源: {source})\n{doc.page_content}")
+
+        return "\n\n".join(context_parts)
 
 
 # 全局 RAG 服务实例

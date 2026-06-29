@@ -36,3 +36,6 @@ loguru>=0.7.0
 python-dateutil>=2.8.2
 huggingface_hub>=0.25.0
 tenacity>=8.2.0
+
+# BM25 关键词检索（混合召回）
+rank-bm25>=0.2.2

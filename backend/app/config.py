@@ -125,8 +125,18 @@ class Settings(BaseSettings):
 
     @property
     def rag_embedding_provider(self) -> str:
-        """获取RAG Embedding提供者: huggingface / openai"""
+        """获取RAG Embedding提供者: huggingface / openai / tfidf"""
         return os.getenv("RAG_EMBEDDING_PROVIDER") or "huggingface"
+
+    @property
+    def rag_embedding_base_url(self) -> str:
+        """获取RAG Embedding API 地址（仅 openai provider 使用，如 Ollama 的 http://localhost:11434/v1）"""
+        return os.getenv("RAG_EMBEDDING_BASE_URL") or ""
+
+    @property
+    def rag_embedding_api_key(self) -> str:
+        """获取RAG Embedding API Key（仅 openai provider 使用，Ollama 本地可留空）"""
+        return os.getenv("RAG_EMBEDDING_API_KEY") or ""
 
     @property
     def rag_chunk_size(self) -> int:
